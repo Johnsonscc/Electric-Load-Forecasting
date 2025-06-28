@@ -281,11 +281,15 @@ def create_ensemble_model(lightgbm_model, lstm_model, feature_columns):
 def evaluate_model(model, X, y, model_name="Model", lmbda=None):
     """ 模型评估并输出指标 """
     # 预测
-    if model_name == "LSTM":
+    if isinstance(model, np.ndarray):
+        # 如果传入的是数组（直接预测结果），直接使用
+        y_pred_mean = model
+    elif model_name == "LSTM":
         y_pred = model.predict(X)
         # LSTM输出是24小时的预测，我们取平均值做对比
         y_pred_mean = y_pred.mean(axis=1)
     else:
+        # 其他模型调用 predict 方法
         y_pred = model.predict(X)
         y_pred_mean = y_pred
 
