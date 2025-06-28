@@ -286,31 +286,44 @@ def evaluate_model(model, X, y, model_name="Model", lmbda=None, is_lstm=False):
     if is_lstm:
         # LSTM模型特殊处理：预测24小时序列
         y_pred = model.predict(X)
+
+        # 使用传入的y的索引作为基础（确保是DatetimeIndex）
+        if not isinstance(y.index, pd.DatetimeIndex):
+            raise ValueError(f"{model_name}评估错误: y的索引必须是DatetimeIndex")
+
+        # 计算总预测点数
+        total_points = len(y_pred) * 24
+
         # 创建时间索引：从第一个预测点开始，每小时一个点
-        start_idx = y.index[0]
-        time_index = pd.date_range(start=start_idx, periods=len(y_pred) * 24, freq='H')
+        time_index = pd.date_range(
+            start=y.index[0],
+            periods=total_points,
+            freq='H'
+        )
+
         # 展平预测结果 (samples*24,)
         y_pred_flat = y_pred.ravel()
-        # 展平实际值
-        y_flat = y.values.ravel()[:len(y_pred_flat)]  # 确保长度匹配
+
+        # 展平实际值，确保长度匹配
+        y_flat = y.values.ravel()[:len(y_pred_flat)]
     else:
         # 常规模型预测
         y_pred_flat = model.predict(X) if not isinstance(model, np.ndarray) else model
         time_index = y.index
+        y_flat = y.values
 
     # 创建预测序列
     y_pred_series = pd.Series(y_pred_flat, index=time_index)
 
     # 反Box-Cox变换
     if lmbda is not None:
-        y_flat = inv_boxcox(y, lmbda) if not is_lstm else inv_boxcox(y_flat, lmbda)
+        y_flat = inv_boxcox(y_flat, lmbda)
         y_pred_series = inv_boxcox(y_pred_series, lmbda)
 
     # 计算指标（确保使用对齐后的数据）
-    y_eval = y_flat if is_lstm else y
-    mae = mean_absolute_error(y_eval, y_pred_series)
-    rmse = np.sqrt(mean_squared_error(y_eval, y_pred_series))
-    r2 = r2_score(y_eval, y_pred_series)
+    mae = mean_absolute_error(y_flat, y_pred_series)
+    rmse = np.sqrt(mean_squared_error(y_flat, y_pred_series))
+    r2 = r2_score(y_flat, y_pred_series)
 
     # 周聚合评估 - 确保y有DatetimeIndex
     if isinstance(y.index, pd.DatetimeIndex):
