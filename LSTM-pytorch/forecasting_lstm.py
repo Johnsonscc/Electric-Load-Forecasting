@@ -492,8 +492,9 @@ def main():
 
     # 评估融合模型 - 使用重叠时间段的实际值
     results['Weighted Fusion'] = evaluate_model(
-        fused_pred,
-        y_test.loc[overlap_mask].iloc[:min_len],  # 确保长度匹配
+        fused_pred,  # 预测值数组
+        None,  # 不需要特征数据
+        y_test.loc[overlap_mask].iloc[:min_len],  # 实际值
         "加权平均融合模型",
         lmbda
     )
