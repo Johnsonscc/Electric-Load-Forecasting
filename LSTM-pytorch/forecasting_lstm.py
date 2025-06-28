@@ -385,13 +385,16 @@ def main():
     np.random.seed(42)
     tf.random.set_seed(42)
 
+    # 定义lookback参数（与create_datasets一致）
+    lookback = 168  # 与create_datasets默认值一致
+
     # 1. 数据加载与预处理
     data_path = "./dataset/huihedata_hour_asc.csv"
     df, lmbda = load_and_preprocess_data(data_path)
     print(f"处理后的数据:\n{df.head()}")
 
     # 2. 创建特征数据集
-    datasets = create_datasets(df)
+    datasets = create_datasets(df, lookback=lookback)
     (X_train, y_train, X_val, y_val, X_test, y_test,
      X_train_lstm, y_train_lstm, X_val_lstm, y_val_lstm, X_test_lstm, y_test_lstm,
      feature_names) = datasets
@@ -411,18 +414,39 @@ def main():
         "LightGBM", lmbda
     )
 
-    # LSTM评估
-    lstm_test_pred = lstm_model.predict(X_test_lstm)
-    # 创建LSTM预测的时间索引
-    lstm_start_time = y_test.index[-len(X_test_lstm) * 24]  # 预测起始时间
+    # LSTM评估 - 修正时间索引计算
+    # 正确计算LSTM预测起始时间
+    lstm_start_idx = lookback  # 序列起始位置
+    lstm_start_time = y_test.index[lstm_start_idx]
+
+    # 创建时间索引：从起始时间开始，每24小时一组
     lstm_time_index = pd.date_range(
         start=lstm_start_time,
-        periods=len(lstm_test_pred) * 24,
-        freq='H'
+        periods=len(X_test_lstm),
+        freq='H'  # 每小时一个点
     )
+
+    # 展平LSTM预测结果
+    lstm_pred = lstm_model.predict(X_test_lstm)
+
+    # 创建LSTM预测的实际值Series（按小时对齐）
+    y_test_lstm_series = pd.Series(
+        y_test_lstm.ravel(),  # 展平为1D数组
+        index=pd.date_range(
+            start=lstm_start_time,
+            periods=len(y_test_lstm.ravel()),
+            freq='H'
+        )
+    )
+
+    # LSTM评估
     results['LSTM'] = evaluate_model(
-        lstm_model, X_test_lstm, y_test_lstm,
-        "LSTM", lmbda, is_lstm=True
+        lstm_model,
+        X_test_lstm,
+        y_test_lstm_series,
+        "LSTM",
+        lmbda,
+        is_lstm=True
     )
 
     # 6. 模型融合策略（仅融合重叠时间段）
@@ -431,13 +455,20 @@ def main():
     overlap_end = y_test.index[-1]
 
     # 截取重叠部分的LightGBM预测
+    # 注意：确保只取重叠时间段
+    overlap_mask = (y_test.index >= overlap_start) & (y_test.index <= overlap_end)
     lgb_overlap_pred = lgb_model.predict(
-        X_test.loc[overlap_start:overlap_end].values
+        X_test.loc[overlap_mask].values
     )
 
-    # 截取重叠部分的LSTM预测（前n个序列）
-    overlap_hours = (overlap_end - overlap_start).total_seconds() // 3600 + 1
-    lstm_overlap_pred = lstm_test_pred.ravel()[:int(overlap_hours)]
+    # 截取重叠部分的LSTM预测
+    # 注意：LSTM预测已经按小时对齐
+    lstm_overlap_pred = lstm_pred.ravel()[:len(lgb_overlap_pred)]
+
+    # 确保长度匹配
+    min_len = min(len(lgb_overlap_pred), len(lstm_overlap_pred))
+    lgb_overlap_pred = lgb_overlap_pred[:min_len]
+    lstm_overlap_pred = lstm_overlap_pred[:min_len]
 
     # 加权平均融合
     fused_pred = weighted_average_fusion(
@@ -446,10 +477,10 @@ def main():
         weights=(0.4, 0.6)
     )
 
-    # 评估融合模型
+    # 评估融合模型 - 使用重叠时间段的实际值
     results['Weighted Fusion'] = evaluate_model(
         fused_pred,
-        y_test.loc[overlap_start:overlap_end],
+        y_test.loc[overlap_mask].iloc[:min_len],  # 确保长度匹配
         "加权平均融合模型",
         lmbda
     )
