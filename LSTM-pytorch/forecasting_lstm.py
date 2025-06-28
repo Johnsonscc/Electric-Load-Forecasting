@@ -16,7 +16,9 @@ from scipy.stats import boxcox
 from scipy.special import inv_boxcox
 
 # 在文件开头导入后添加
-plt.rcParams['font.sans-serif'] = ['Arial Unicode MS']  # Mac系统 # 或 Windows: plt.rcParams['font.sans-serif'] = ['SimHei']
+# Mac系统 plt.rcParams['font.sans-serif'] = ['Arial Unicode MS']
+# 或 Windows:
+plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题2号
 
 
@@ -278,37 +280,37 @@ def create_ensemble_model(lightgbm_model, lstm_model, feature_columns):
 # -------------------------------
 # 4. 模型评估与融合
 # -------------------------------
-def evaluate_model(model, X, y, model_name="Model", lmbda=None):
+def evaluate_model(model, X, y, model_name="Model", lmbda=None, is_lstm=False):
     """ 模型评估并输出指标 """
-    # 预测
-    if isinstance(model, np.ndarray):
-        # 如果传入的是数组（直接预测结果），直接使用
-        y_pred_mean = model
-    elif model_name == "LSTM":
+    # 预测处理
+    if is_lstm:
+        # LSTM模型特殊处理：预测24小时序列
         y_pred = model.predict(X)
-        # LSTM输出是24小时的预测，我们取平均值做对比
-        y_pred_mean = y_pred.mean(axis=1)
+        # 创建时间索引：从第一个预测点开始，每小时一个点
+        start_idx = y.index[0]
+        time_index = pd.date_range(start=start_idx, periods=len(y_pred) * 24, freq='H')
+        # 展平预测结果 (samples*24,)
+        y_pred_flat = y_pred.ravel()
+        # 展平实际值
+        y_flat = y.values.ravel()[:len(y_pred_flat)]  # 确保长度匹配
     else:
-        # 其他模型调用 predict 方法
-        y_pred = model.predict(X)
-        y_pred_mean = y_pred
+        # 常规模型预测
+        y_pred_flat = model.predict(X) if not isinstance(model, np.ndarray) else model
+        time_index = y.index
 
-    # 确保y_pred_mean有正确的索引
-    if isinstance(y, pd.Series) and len(y_pred_mean) == len(y):
-        y_pred_series = pd.Series(y_pred_mean, index=y.index)
-    else:
-        y_pred_series = pd.Series(y_pred_mean)
-        print(f"警告: {model_name}预测值与实际值长度不匹配 ({len(y_pred_mean)} vs {len(y)})")
+    # 创建预测序列
+    y_pred_series = pd.Series(y_pred_flat, index=time_index)
 
-    # 反变换
+    # 反Box-Cox变换
     if lmbda is not None:
-        y = inv_boxcox(y, lmbda)
+        y_flat = inv_boxcox(y, lmbda) if not is_lstm else inv_boxcox(y_flat, lmbda)
         y_pred_series = inv_boxcox(y_pred_series, lmbda)
 
-    # 计算指标
-    mae = mean_absolute_error(y, y_pred_series)
-    rmse = np.sqrt(mean_squared_error(y, y_pred_series))
-    r2 = r2_score(y, y_pred_series)
+    # 计算指标（确保使用对齐后的数据）
+    y_eval = y_flat if is_lstm else y
+    mae = mean_absolute_error(y_eval, y_pred_series)
+    rmse = np.sqrt(mean_squared_error(y_eval, y_pred_series))
+    r2 = r2_score(y_eval, y_pred_series)
 
     # 周聚合评估 - 确保y有DatetimeIndex
     if isinstance(y.index, pd.DatetimeIndex):
@@ -405,37 +407,51 @@ def main():
 
     # LightGBM评估
     results['LightGBM'] = evaluate_model(
-        lgb_model, X_test.values, pd.Series(y_test),
+        lgb_model, X_test.values, y_test,
         "LightGBM", lmbda
     )
 
-    # 计算 LSTM 预测结果
-    lstm_test_pred = lstm_model.predict(X_test_lstm)
-    lstm_mean_pred = lstm_test_pred.mean(axis=1)  # 保存预测结果
-
     # LSTM评估
-    test_time_index = y_test.index[len(y_test) - len(X_test_lstm):]
-    y_test_lstm_series = pd.Series(y_test_lstm.mean(axis=1), index=test_time_index)
-
+    lstm_test_pred = lstm_model.predict(X_test_lstm)
+    # 创建LSTM预测的时间索引
+    lstm_start_time = y_test.index[-len(X_test_lstm) * 24]  # 预测起始时间
+    lstm_time_index = pd.date_range(
+        start=lstm_start_time,
+        periods=len(lstm_test_pred) * 24,
+        freq='H'
+    )
     results['LSTM'] = evaluate_model(
-        lstm_model, X_test_lstm, y_test_lstm_series,
-        "LSTM", lmbda
+        lstm_model, X_test_lstm, y_test_lstm,
+        "LSTM", lmbda, is_lstm=True
     )
 
-    # 6. 模型融合策略
-    # 方案1: 加权平均
-    lgb_test_pred = lgb_model.predict(X_test.values)
+    # 6. 模型融合策略（仅融合重叠时间段）
+    # 获取重叠时间段
+    overlap_start = lstm_start_time
+    overlap_end = y_test.index[-1]
 
-    # 创建LSTM匹配的预测
-    full_lstm_pred = np.zeros(len(X_test))
-    full_lstm_pred[len(full_lstm_pred) - len(lstm_mean_pred):] = lstm_mean_pred
-    full_lstm_pred[:len(full_lstm_pred) - len(lstm_mean_pred)] = lstm_mean_pred[0]
+    # 截取重叠部分的LightGBM预测
+    lgb_overlap_pred = lgb_model.predict(
+        X_test.loc[overlap_start:overlap_end].values
+    )
 
-    # 加权平均融合 (40% LightGBM + 60% LSTM)
-    fused_pred = weighted_average_fusion(lgb_test_pred, full_lstm_pred, weights=(0.4, 0.6))
+    # 截取重叠部分的LSTM预测（前n个序列）
+    overlap_hours = (overlap_end - overlap_start).total_seconds() // 3600 + 1
+    lstm_overlap_pred = lstm_test_pred.ravel()[:int(overlap_hours)]
+
+    # 加权平均融合
+    fused_pred = weighted_average_fusion(
+        lgb_overlap_pred,
+        lstm_overlap_pred,
+        weights=(0.4, 0.6)
+    )
+
+    # 评估融合模型
     results['Weighted Fusion'] = evaluate_model(
-        fused_pred, pd.Series(y_test),
-        "加权平均融合模型", lmbda
+        fused_pred,
+        y_test.loc[overlap_start:overlap_end],
+        "加权平均融合模型",
+        lmbda
     )
 
     # 7. 模型保存
