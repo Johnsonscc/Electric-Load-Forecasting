@@ -405,13 +405,16 @@ def main():
         "LightGBM", lmbda
     )
 
-    # LSTM评估 - 传入模型对象和测试数据
-    # 获取测试集的时间索引
+    # 计算 LSTM 预测结果
+    lstm_test_pred = lstm_model.predict(X_test_lstm)
+    lstm_mean_pred = lstm_test_pred.mean(axis=1)  # 保存预测结果
+
+    # LSTM评估
     test_time_index = y_test.index[len(y_test) - len(X_test_lstm):]
     y_test_lstm_series = pd.Series(y_test_lstm.mean(axis=1), index=test_time_index)
 
     results['LSTM'] = evaluate_model(
-        lstm_model, X_test_lstm, y_test_lstm_series,  # 传入模型对象和测试数据
+        lstm_model, X_test_lstm, y_test_lstm_series,
         "LSTM", lmbda
     )
 
