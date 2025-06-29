@@ -281,57 +281,72 @@ def create_ensemble_model(lightgbm_model, lstm_model, feature_columns):
 # -------------------------------
 def evaluate_model(model, X, y, model_name="Model", lmbda=None, is_lstm=False):
     """ 模型评估并输出指标 """
-    # 预测处理
-    if is_lstm:
+    # 统一处理预测值
+    if isinstance(model, np.ndarray):
+        # 预计算预测值直接使用
+        y_pred_flat = model
+        time_index = y.index[:len(model)]
+    elif is_lstm:
         # LSTM模型特殊处理：预测24小时序列
-        y_pred = model.predict(X)
-
-        # 使用传入的y的索引作为基础（确保是DatetimeIndex）
-        if not isinstance(y.index, pd.DatetimeIndex):
-            raise ValueError(f"{model_name}评估错误: y的索引必须是DatetimeIndex")
-
-        # 计算总预测点数
-        total_points = len(y_pred) * 24
-
-        # 创建时间索引：从第一个预测点开始，每小时一个点
-        time_index = pd.date_range(
-            start=y.index[0],
-            periods=total_points,
-            freq='H'
-        )
-
-        # 展平预测结果 (samples*24,)
+        y_pred = model.predict(X, verbose=0)
         y_pred_flat = y_pred.ravel()
 
-        # 展平实际值，确保长度匹配
-        y_flat = y.values.ravel()[:len(y_pred_flat)]
+        # 创建时间索引
+        if len(y) > 0:
+            time_index = pd.date_range(
+                start=y.index[0],
+                periods=len(y_pred_flat),
+                freq='H'
+            )[:len(y_pred_flat)]
+        else:
+            time_index = None
     else:
         # 常规模型预测
-        y_pred_flat = model.predict(X) if not isinstance(model, np.ndarray) else model
+        y_pred_flat = model.predict(X)
         time_index = y.index
-        y_flat = y.values
+
+    # 确保数据对齐
+    if time_index is None or len(time_index) != len(y_pred_flat):
+        y_pred_flat = y_pred_flat[:len(time_index)] if time_index is not None else y_pred_flat
 
     # 创建预测序列
-    y_pred_series = pd.Series(y_pred_flat, index=time_index)
+    if time_index is not None and len(time_index) == len(y_pred_flat):
+        y_pred_series = pd.Series(y_pred_flat, index=time_index)
+    else:
+        y_pred_series = pd.Series(y_pred_flat)  # 作为备选
 
     # 反Box-Cox变换
     if lmbda is not None:
-        y_flat = inv_boxcox(y_flat, lmbda)
-        y_pred_series = inv_boxcox(y_pred_series, lmbda)
-
-    # 计算指标（确保使用对齐后的数据）
-    mae = mean_absolute_error(y_flat, y_pred_series)
-    rmse = np.sqrt(mean_squared_error(y_flat, y_pred_series))
-    r2 = r2_score(y_flat, y_pred_series)
-
-    # 周聚合评估 - 确保y有DatetimeIndex
-    if isinstance(y.index, pd.DatetimeIndex):
-        weekly_y = y.groupby(pd.Grouper(freq='W')).sum()
-        weekly_pred = y_pred_series.groupby(pd.Grouper(freq='W')).sum()
-        weekly_r2 = r2_score(weekly_y, weekly_pred)
+        y_values = inv_boxcox(y.values, lmbda) if len(y) > 0 else []
+        if len(y_pred_series) > 0:
+            y_pred_series = inv_boxcox(y_pred_series, lmbda)
     else:
-        weekly_r2 = None
-        print(f"警告: {model_name}无法计算周聚合R² - 索引不是时间类型")
+        y_values = y.values if len(y) > 0 else []
+
+    # 计算指标
+    try:
+        mae = mean_absolute_error(y_values, y_pred_series.values[:len(y_values)])
+        rmse = np.sqrt(mean_squared_error(y_values, y_pred_series.values[:len(y_values)]))
+        r2 = r2_score(y_values, y_pred_series.values[:len(y_values)])
+    except Exception as e:
+        print(f"计算指标错误: {str(e)}")
+        mae = rmse = r2 = float('nan')
+
+    # 周聚合评估
+    weekly_r2 = None
+    if isinstance(y.index, pd.DatetimeIndex):
+        try:
+            if len(y) > 7 * 24:  # 至少一周的数据
+                weekly_y = y.groupby(pd.Grouper(freq='W')).sum()
+                weekly_pred = y_pred_series.resample('W').sum()
+                if len(weekly_y) > 1 and len(weekly_pred) > 1:
+                    min_length = min(len(weekly_y), len(weekly_pred))
+                    weekly_r2 = r2_score(
+                        weekly_y[:min_length],
+                        weekly_pred[:min_length]
+                    )
+        except Exception as e:
+            print(f"周聚合评估错误: {str(e)}")
 
     # 结果输出
     print(f"\n{model_name}模型评估结果:")
@@ -341,47 +356,59 @@ def evaluate_model(model, X, y, model_name="Model", lmbda=None, is_lstm=False):
     if weekly_r2 is not None:
         print(f"每周充电量预测R²: {weekly_r2:.4f}")
 
-    # 可视化结果（需要时间索引）
-    if isinstance(y.index, pd.DatetimeIndex):
-        plt.figure(figsize=(30, 6))
+    # 可视化结果
+    try:
+        if len(y) > 0 and isinstance(y.index, pd.DatetimeIndex) and len(y_pred_series) > 0:
+            plt.figure(figsize=(30, 6))
 
-        # 原始值和预测值
-        plt.subplot(1, 2, 1)
-        plt.plot(y.index, y, label='实际值', alpha=0.7)
-        plt.plot(y.index, y_pred_series, label='预测值', alpha=0.7)
-        plt.title(f"{model_name}预测结果对比")
-        plt.xlabel('时间')
-        plt.ylabel('充电量')
-        plt.legend()
+            # 原始值和预测值
+            plt.subplot(1, 2, 1)
+            plt.plot(y.index, y_values, label='实际值', alpha=0.7)
+            plt.plot(y_pred_series.index, y_pred_series.values, label='预测值', alpha=0.7)
+            plt.title(f"{model_name}预测结果对比")
+            plt.xlabel('时间')
+            plt.ylabel('充电量')
+            plt.legend()
 
-        # 时间段聚合
-        plt.subplot(1, 2, 2)
-        period = pd.cut(
-            y.index.hour,
-            bins=[-1, 8, 15, 23],
-            labels=['谷时段', '平时段', '峰时段']
-        )
+            # 时间段聚合
+            plt.subplot(1, 2, 2)
+            period = pd.cut(
+                y.index.hour,
+                bins=[-1, 8, 15, 23],
+                labels=['谷时段', '平时段', '峰时段']
+            )
 
-        period_accuracy = pd.DataFrame({
-            'Actual': y.values,
-            'Predicted': y_pred_series.values,
-            'Period': period.to_numpy()
-        }).groupby('Period', group_keys=False).apply(
-            lambda x: pd.Series({
-                'MAE': mean_absolute_error(x['Actual'], x['Predicted']),
-                'R²': r2_score(x['Actual'], x['Predicted'])
+            # 确保数据长度匹配
+            min_length = min(len(y), len(y_pred_series))
+            period_df = pd.DataFrame({
+                'Actual': y_values[:min_length],
+                'Predicted': y_pred_series.values[:min_length],
+                'Period': period[:min_length]
             })
-        )
 
-        sns.heatmap(period_accuracy, annot=True, fmt=".3f", cmap="YlGnBu")
-        plt.title(f"分时段预测准确度 ({model_name})")
+            period_accuracy = period_df.groupby('Period').apply(
+                lambda x: pd.Series({
+                    'MAE': mean_absolute_error(x['Actual'], x['Predicted']),
+                    'R²': r2_score(x['Actual'], x['Predicted'])
+                })
+            )
 
-        plt.tight_layout()
-        plt.savefig(f'{model_name}_evaluation.png', dpi=300)
-    else:
-        print(f"警告: {model_name}无法生成可视化 - 索引不是时间类型")
+            sns.heatmap(period_accuracy, annot=True, fmt=".3f", cmap="YlGnBu")
+            plt.title(f"分时段预测准确度 ({model_name})")
 
-    return {'MAE': mae, 'RMSE': rmse, 'R²': r2, 'Weekly R²': weekly_r2}
+            plt.tight_layout()
+            plt.savefig(f'{model_name}_evaluation.png', dpi=300)
+        else:
+            print(f"警告: {model_name}无法生成可视化 - 数据不足或索引无效")
+    except Exception as e:
+        print(f"生成可视化错误: {str(e)}")
+
+    return {
+        'MAE': mae,
+        'RMSE': rmse,
+        'R²': r2,
+        'Weekly R²': weekly_r2
+    }
 
 
 def weighted_average_fusion(lgb_pred, lstm_pred, weights=(0.4, 0.6)):
@@ -427,28 +454,27 @@ def main():
     )
 
     # LSTM评估 - 修正时间索引计算
-    # 正确计算LSTM预测起始时间
-    lstm_start_idx = lookback  # 序列起始位置
-    lstm_start_time = y_test.index[lstm_start_idx]
-
-    # 创建时间索引：从起始时间开始，每24小时一组
-    lstm_time_index = pd.date_range(
-        start=lstm_start_time,
-        periods=len(X_test_lstm),
-        freq='H'  # 每小时一个点
-    )
-
     # 展平LSTM预测结果
-    lstm_pred = lstm_model.predict(X_test_lstm)  # 预测值
-    y_test_lstm_series = pd.Series(
-        y_test_lstm.ravel(),
-        index=y_test.index[lookback: lookback + len(y_test_lstm.ravel())]  # 核心修正点
-    )
+    lstm_pred = lstm_model.predict(X_test_lstm, verbose=0)
+    # 创建实际值的索引和时间点列表
+    time_indices = []
+    actual_values = []
+    for i in range(len(X_test_lstm)):
+        # 获取该预测序列对应的起始位置
+        sequence_start_idx = lookback + i
 
+        # 对于该序列的24小时预测
+        for hour in range(24):
+            if (sequence_start_idx + hour) < len(y_test):
+                time_indices.append(y_test.index[sequence_start_idx + hour])
+                actual_values.append(y_test.iloc[sequence_start_idx + hour])
+    # 创建实际值Series
+    y_test_lstm_series = pd.Series(actual_values, index=time_indices)
+    # 评估LSTM模型
     results['LSTM'] = evaluate_model(
         lstm_model,
         X_test_lstm,
-        y_test_lstm_series,  # 传入真实索引关联的Series
+        y_test_lstm_series,
         "LSTM",
         lmbda,
         is_lstm=True
