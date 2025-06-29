@@ -15,10 +15,9 @@ import joblib
 from scipy.stats import boxcox
 from scipy.special import inv_boxcox
 
-# 在文件开头导入后添加
-# Mac系统 plt.rcParams['font.sans-serif'] = ['Arial Unicode MS']
-# 或 Windows:
-plt.rcParams['font.sans-serif'] = ['SimHei']
+# Mac系统
+plt.rcParams['font.sans-serif'] = ['Arial Unicode MS']
+# 或 Windows plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题2号
 
 
@@ -344,7 +343,7 @@ def evaluate_model(model, X, y, model_name="Model", lmbda=None, is_lstm=False):
 
     # 可视化结果（需要时间索引）
     if isinstance(y.index, pd.DatetimeIndex):
-        plt.figure(figsize=(30, 6))
+        plt.figure(figsize=(12, 6))
 
         # 原始值和预测值
         plt.subplot(1, 2, 1)
