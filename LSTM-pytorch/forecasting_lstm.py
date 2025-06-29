@@ -343,7 +343,7 @@ def evaluate_model(model, X, y, model_name="Model", lmbda=None, is_lstm=False):
 
     # 可视化结果（需要时间索引）
     if isinstance(y.index, pd.DatetimeIndex):
-        plt.figure(figsize=(12, 6))
+        plt.figure(figsize=(30, 6))
 
         # 原始值和预测值
         plt.subplot(1, 2, 1)
@@ -439,23 +439,16 @@ def main():
     )
 
     # 展平LSTM预测结果
-    lstm_pred = lstm_model.predict(X_test_lstm)
-
-    # 创建LSTM预测的实际值Series（按小时对齐）
+    lstm_pred = lstm_model.predict(X_test_lstm)  # 预测值
     y_test_lstm_series = pd.Series(
-        y_test_lstm.ravel(),  # 展平为1D数组
-        index=pd.date_range(
-            start=lstm_start_time,
-            periods=len(y_test_lstm.ravel()),
-            freq='H'
-        )
+        y_test_lstm.ravel(),
+        index=y_test.index[lookback: lookback + len(y_test_lstm.ravel())]  # 核心修正点
     )
 
-    # LSTM评估
     results['LSTM'] = evaluate_model(
         lstm_model,
         X_test_lstm,
-        y_test_lstm_series,
+        y_test_lstm_series,  # 传入真实索引关联的Series
         "LSTM",
         lmbda,
         is_lstm=True
