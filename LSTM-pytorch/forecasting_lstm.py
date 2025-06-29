@@ -454,22 +454,29 @@ def main():
     )
 
     # LSTM评估 - 修正时间索引计算
+    # 正确计算LSTM预测起始时间
+    lstm_start_idx = lookback  # 序列起始位置
+    lstm_start_time = y_test.index[lstm_start_idx]  # 添加这行定义
+
     # 展平LSTM预测结果
     lstm_pred = lstm_model.predict(X_test_lstm, verbose=0)
+
     # 创建实际值的索引和时间点列表
     time_indices = []
     actual_values = []
     for i in range(len(X_test_lstm)):
         # 获取该预测序列对应的起始位置
-        sequence_start_idx = lookback + i
+        sequence_start_idx = lstm_start_idx + i
 
         # 对于该序列的24小时预测
         for hour in range(24):
             if (sequence_start_idx + hour) < len(y_test):
                 time_indices.append(y_test.index[sequence_start_idx + hour])
                 actual_values.append(y_test.iloc[sequence_start_idx + hour])
+
     # 创建实际值Series
     y_test_lstm_series = pd.Series(actual_values, index=time_indices)
+
     # 评估LSTM模型
     results['LSTM'] = evaluate_model(
         lstm_model,
